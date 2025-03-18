@@ -7,6 +7,7 @@ import sys
 import glob
 import argparse
 import logging
+import time
 from pathlib import Path
 from collections import Counter
 import matplotlib.pyplot as plt
@@ -22,6 +23,68 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class ProgressBar:
+    """进度条类"""
+    def __init__(self, total, prefix='', suffix='', length=50, fill='█', empty='░', color=True):
+        self.total = total
+        self.prefix = prefix
+        self.suffix = suffix
+        self.length = length
+        self.fill = fill
+        self.empty = empty
+        self.color = color
+        self.start_time = time.time()
+        self.count = 0
+        
+    def update(self, count=None):
+        """更新进度条"""
+        if count is not None:
+            self.count = count
+        else:
+            self.count += 1
+            
+        percent = self.count / self.total
+        filled_length = int(self.length * percent)
+        bar = self.fill * filled_length + self.empty * (self.length - filled_length)
+        
+        # 计算剩余时间
+        elapsed_time = time.time() - self.start_time
+        if percent > 0:
+            eta = elapsed_time / percent * (1 - percent)
+            time_info = f" | {self._format_time(elapsed_time)}<{self._format_time(eta)}"
+        else:
+            time_info = ""
+            
+        # 带颜色的进度条
+        if self.color:
+            color_code = '\033[92m'  # 绿色
+            if percent < 0.3:
+                color_code = '\033[94m'  # 蓝色
+            elif percent < 0.7:
+                color_code = '\033[93m'  # 黄色
+            reset_code = '\033[0m'
+            bar = f"{color_code}{bar}{reset_code}"
+            
+        # 打印进度条
+        sys.stdout.write(f"\r{self.prefix} |{bar}| {int(percent * 100)}%{time_info} {self.suffix}")
+        sys.stdout.flush()
+        
+        # 完成时换行
+        if self.count >= self.total:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+            
+    def _format_time(self, seconds):
+        """格式化时间显示"""
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h > 0:
+            return f"{h:d}h{m:02d}m"
+        elif m > 0:
+            return f"{m:d}m{s:02d}s"
+        else:
+            return f"{s:d}s"
 
 class GenderStereotypeAnalyzer:
     def __init__(self, config_file=None):
@@ -168,17 +231,24 @@ class GenderStereotypeAnalyzer:
             # 预处理文本
             words = self.preprocess_text(text)
             
+            # 创建进度条
+            progress = ProgressBar(len(words), prefix='分析文本', suffix='', length=40)
+            
             # 统计性别关键词的形容词
             male_adjectives = []
             female_adjectives = []
             
-            for word, _ in words:
+            for i, (word, _) in enumerate(words):
                 if word in self.male_keywords:
                     adjectives = self.extract_adjectives(words, word)
                     male_adjectives.extend(adjectives)
                 elif word in self.female_keywords:
                     adjectives = self.extract_adjectives(words, word)
                     female_adjectives.extend(adjectives)
+                
+                # 更新进度条（每10个词更新一次，以避免过多IO操作）
+                if i % 10 == 0 or i == len(words) - 1:
+                    progress.update(i + 1)
             
             # 统计词频
             male_counter = Counter(male_adjectives)
@@ -195,6 +265,10 @@ class GenderStereotypeAnalyzer:
             # 创建输出目录
             os.makedirs(output_dir, exist_ok=True)
             
+            # 显示可视化进度
+            print("\n开始生成可视化结果...")
+            progress = ProgressBar(4, prefix='生成可视化', suffix='', length=40)
+            
             # 生成词云
             male_wordcloud = WordCloud(
                 font_path=self.font_path,
@@ -202,6 +276,7 @@ class GenderStereotypeAnalyzer:
                 height=400,
                 background_color='white'
             ).generate_from_frequencies(male_counter)
+            progress.update()
             
             female_wordcloud = WordCloud(
                 font_path=self.font_path,
@@ -209,6 +284,7 @@ class GenderStereotypeAnalyzer:
                 height=400,
                 background_color='white'
             ).generate_from_frequencies(female_counter)
+            progress.update()
             
             # 保存词云图
             plt.figure(figsize=(10, 5))
@@ -224,40 +300,49 @@ class GenderStereotypeAnalyzer:
             
             plt.savefig(os.path.join(output_dir, 'wordcloud.png'))
             plt.close()
+            progress.update()
             
-            # 生成对比柱状图
+            # 生成对比柱状图和CSV报告
             plt.figure(figsize=(12, 6))
             male_words = list(male_counter.keys())
             male_counts = list(male_counter.values())
             female_words = list(female_counter.keys())
             female_counts = list(female_counter.values())
             
-            x = np.arange(len(male_words))
-            width = 0.35
+            # 获取所有出现的形容词
+            all_words = list(set(male_words + female_words))
             
-            plt.bar(x - width/2, male_counts, width, label='男性')
-            plt.bar(x + width/2, female_counts, width, label='女性')
-            
-            plt.xlabel('形容词')
-            plt.ylabel('频次')
-            plt.title('性别形容词使用对比')
-            plt.xticks(x, male_words, rotation=45)
-            plt.legend()
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, 'comparison.png'))
-            plt.close()
+            if all_words:  # 确保有形容词
+                x = np.arange(len(all_words))
+                width = 0.35
+                
+                plt.bar(x - width/2, [male_counter.get(word, 0) for word in all_words], width, label='男性')
+                plt.bar(x + width/2, [female_counter.get(word, 0) for word in all_words], width, label='女性')
+                
+                plt.xlabel('形容词')
+                plt.ylabel('频次')
+                plt.title('性别形容词使用对比')
+                plt.xticks(x, all_words, rotation=45)
+                plt.legend()
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, 'comparison.png'))
+                plt.close()
             
             # 生成CSV报告
             df = pd.DataFrame({
-                '形容词': list(set(male_words + female_words)),
-                '男性频次': [male_counter.get(word, 0) for word in set(male_words + female_words)],
-                '女性频次': [female_counter.get(word, 0) for word in set(male_words + female_words)]
+                '形容词': all_words,
+                '男性频次': [male_counter.get(word, 0) for word in all_words],
+                '女性频次': [female_counter.get(word, 0) for word in all_words]
             })
             df.to_csv(os.path.join(output_dir, 'report.csv'), index=False, encoding='utf-8-sig')
+            progress.update()
+            
+            print(f"\n✅ 分析完成！结果已保存到: {output_dir}")
             
         except Exception as e:
             logger.error(f"生成可视化结果失败: {e}")
+            print(f"\n❌ 生成可视化结果失败: {e}")
 
 def analyze_file(input_file, output_dir, config_file=None):
     """分析单个文件"""
@@ -265,20 +350,31 @@ def analyze_file(input_file, output_dir, config_file=None):
         # 创建分析器
         analyzer = GenderStereotypeAnalyzer(config_file)
         
+        # 显示文件信息
+        file_size = os.path.getsize(input_file) / 1024  # KB
+        print(f"\n📄 正在分析文件: {os.path.basename(input_file)} ({file_size:.2f} KB)")
+        
         # 读取文本
         with open(input_file, 'r', encoding='utf-8') as f:
             text = f.read()
         
+        # 显示文本信息
+        print(f"📊 文本长度: {len(text)} 字符")
+        
         # 分析文本
         male_counter, female_counter = analyzer.analyze(text)
+        
+        # 显示统计信息
+        print(f"\n📈 分析结果统计:")
+        print(f"  - 识别出男性相关词汇: {sum(male_counter.values())} 个")
+        print(f"  - 识别出女性相关词汇: {sum(female_counter.values())} 个")
         
         # 可视化结果
         analyzer.visualize(male_counter, female_counter, output_dir)
         
-        logger.info(f"分析完成，结果保存在: {output_dir}")
-        
     except Exception as e:
         logger.error(f"分析文件失败: {e}")
+        print(f"\n❌ 分析文件失败: {e}")
         sys.exit(1)
 
 def analyze_directory(input_dir, output_dir, config_file=None):
@@ -289,16 +385,33 @@ def analyze_directory(input_dir, output_dir, config_file=None):
         
         if not text_files:
             logger.warning(f"在目录 {input_dir} 中没有找到文本文件")
+            print(f"\n❗ 警告: 在目录 {input_dir} 中没有找到文本文件")
             return
         
+        # 显示目录信息
+        print(f"\n📁 正在分析目录: {input_dir}")
+        print(f"📚 发现 {len(text_files)} 个文本文件")
+        
+        # 创建进度条
+        progress = ProgressBar(len(text_files), prefix='分析文件', suffix='', length=40)
+        
         # 为每个文件创建单独的输出目录
-        for text_file in text_files:
+        for i, text_file in enumerate(text_files):
             filename = os.path.basename(text_file)
             file_output_dir = os.path.join(output_dir, os.path.splitext(filename)[0])
+            
+            # 更新进度条的后缀显示当前处理的文件
+            progress.suffix = f"- {filename}"
+            progress.update(i + 1)
+            
+            # 分析文件
             analyze_file(text_file, file_output_dir, config_file)
+            
+        print(f"\n✅ 目录分析完成！结果已保存到: {output_dir}")
             
     except Exception as e:
         logger.error(f"分析目录失败: {e}")
+        print(f"\n❌ 分析目录失败: {e}")
         sys.exit(1)
 
 def main():
